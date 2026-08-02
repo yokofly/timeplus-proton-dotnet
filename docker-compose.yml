@@ -3,6 +3,17 @@
 services:
   proton:
     image: timeplus/proton:latest
+    # Proton preallocates its nativelog segments with fallocate(), which reserves
+    # ~11 GB on a freshly started container. File sizes still look tiny, so `ls`
+    # won't show it -- only the filesystem notices. Fine for a real deployment,
+    # painful for throwaway test containers, so turn it off here: 11 GB -> ~6 MB.
+    # (Add `s/ level: information/ level: debug/g` to the sed for verbose logs.)
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        sed -i'' 's/preallocate: true/preallocate: false/g' /etc/proton-server/config.yaml
+        exec /entrypoint.sh
     ports:
       - "3218:3218"   # HTTP + REST API   — streaming semantics by default
       - "8463:8463"   # native TCP        — used by the JDBC/Go/Python drivers

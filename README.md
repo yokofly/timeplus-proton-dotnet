@@ -36,6 +36,13 @@ arrival spread : 6.0s (buffered would be ~0s)
 The `arrival spread` is the point. Had `HttpClient` buffered the response, all
 three rows would have appeared together at the end.
 
+> **Disk note.** The compose file disables nativelog preallocation. By default
+> Proton `fallocate()`s its log segments and a freshly started container reserves
+> **~11 GB** — and because `fallocate` claims blocks past EOF, the file sizes
+> still look tiny, so nothing in `ls` hints at it. Sensible for a real
+> deployment, rough on throwaway test containers. Turning it off takes the same
+> container to **~6 MB** with no behavioural change.
+
 ## Usage
 
 ```csharp
