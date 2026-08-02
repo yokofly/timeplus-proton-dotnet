@@ -14,12 +14,13 @@ queries reach a .NET process incrementally, row by row, as data is ingested.
 docker compose up --exit-code-from app
 ```
 
-Starts a Proton container and a `dotnet/sdk:8.0` container, ingests three rows
-three seconds apart, and asserts they arrive one at a time:
+Starts a Proton container plus a `dotnet/sdk:8.0` container and runs three
+self-checking demos. Run just one with `dotnet run -- basic|random|mv`.
+
+**`basic`** — `CREATE STREAM`, REST ingest, subscription, historical read.
+Ingests three rows three seconds apart and asserts they arrive one at a time:
 
 ```
-connected to Proton 3.0.26
-created stream dotnet_demo
   [t+  2.5s] ingested  live-1
   [t+  2.5s] streamed  101 live-1
   [t+  5.5s] ingested  live-2
@@ -27,14 +28,27 @@ created stream dotnet_demo
   [t+  8.5s] ingested  live-3
   [t+  8.5s] streamed  103 live-3
 
-historical read: 3 rows -> 101:live-1, 102:live-2, 103:live-3
-arrival spread : 6.0s (buffered would be ~0s)
-
-=== PASS ===
+  historical read : 3 rows
+  arrival spread  : 6.0s (buffered would be ~0s)
 ```
 
 The `arrival spread` is the point. Had `HttpClient` buffered the response, all
 three rows would have appeared together at the end.
+
+**`random`** — `CREATE RANDOM STREAM` generates its own data at a set rate
+(`SETTINGS eps = 20`), so you can exercise a consumer with no producer running
+alongside it. Useful for load-testing your own code.
+
+**`mv`** — a materialized view is a *continuous* query: it keeps running
+server-side, streams its output, and stores it for historical reads. This one
+tumbles a 2-second window over the random stream:
+
+```
+  2026-08-02 01:43:12.000  device_0  avg= 51.80  n=4
+  2026-08-02 01:43:12.000  device_1  avg= 63.41  n=7
+  2026-08-02 01:43:14.000  device_0  avg= 56.91  n=11
+  2026-08-02 01:43:14.000  device_1  avg= 34.46  n=10
+```
 
 > **Disk note.** The compose file disables nativelog preallocation. By default
 > Proton `fallocate()`s its log segments and a freshly started container reserves
@@ -61,7 +75,29 @@ await foreach (var row in client.StreamAsync<Row>("SELECT id, msg FROM my_stream
 record Row(int id, string msg);
 ```
 
-## Three things to know
+Materialized views and random streams are just DDL, so they need no extra API:
+
+```csharp
+await client.ExecuteAsync("""
+    CREATE RANDOM STREAM devices(
+        device      string default 'device_' || to_string(rand() % 4),
+        temperature float  default rand() % 1000 / 10)
+    SETTINGS eps = 20
+    """);
+
+await client.ExecuteAsync("""
+    CREATE MATERIALIZED VIEW device_stats AS
+        SELECT window_start AS ts, device, round(avg(temperature), 2) AS avg_temp
+        FROM tumble(devices, 2s)
+        GROUP BY window_start, device
+    """);
+
+// subscribe to the view's output as it is computed
+await foreach (var s in client.StreamAsync<Stat>("SELECT * FROM device_stats", ct))
+    Console.WriteLine($"{s.ts} {s.device} {s.avg_temp}");
+```
+
+## Four things to know
 
 **1. Streaming needs two specific settings.** `HttpCompletionOption.ResponseHeadersRead`
 on the request, and `Timeout = Timeout.InfiniteTimeSpan` on the `HttpClient`.
@@ -73,7 +109,13 @@ subscription. Both are in [`ProtonClient.cs`](ProtonClient.cs) with comments.
 and only returns rows that arrive *after* you connect. For a normal bounded read
 use `SELECT * FROM table(my_stream)`. This trips up nearly everyone once.
 
-**3. Be careful with ClickHouse .NET clients.** ClickHouse.Driver, ClickHouse.Client,
+**3. `window_start` is reserved — alias it in a materialized view.** A
+`CREATE MATERIALIZED VIEW` that emits `window_start` as an output column fails
+with `Column window_start is reserved, should not used in create query`. Write
+`SELECT window_start AS ts, ... GROUP BY window_start` instead. Same for
+`window_end`. See [`Demos.cs`](Demos.cs).
+
+**4. Be careful with ClickHouse .NET clients.** ClickHouse.Driver, ClickHouse.Client,
 and Octonica will partly work against the ClickHouse-compatible port 8123, but
 Proton's type names are lowercase — `int32`, `string`, `datetime64(3)` instead of
 `Int32`/`String`/`DateTime64`. Anything parsing type names out of RowBinary or the

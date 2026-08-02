@@ -1,14 +1,16 @@
-// Demo + self-check for ProtonClient. `docker compose up` runs this against a
-// real Proton container and asserts that streaming delivery is truly incremental.
-
-using System.Diagnostics;
+// Runs the demos in Demos.cs against a live Proton instance.
+//
+//   docker compose up              -- all three
+//   dotnet run -- basic|random|mv  -- just one
 
 var url = Environment.GetEnvironmentVariable("PROTON_URL") ?? "http://localhost:3218";
+var which = args.Length > 0 ? args[0].ToLowerInvariant() : "all";
+
 using var client = new ProtonClient(url);
-using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
 var ct = cts.Token;
 
-Console.WriteLine($"\n=== Timeplus Proton from .NET, no driver ({url}) ===\n");
+Console.WriteLine($"\n=== Timeplus Proton from .NET, no driver ({url}) ===");
 
 // -- wait for the server ---------------------------------------------------
 string version = "";
@@ -19,60 +21,29 @@ for (var i = 0; i < 60 && version.Length == 0; i++)
     catch { await Task.Delay(1000, ct); }
 }
 if (version.Length == 0) { Console.WriteLine("server never came up"); return 1; }
-Console.WriteLine($"connected to Proton {version}\n");
+Console.WriteLine($"connected to Proton {version}");
 
-// -- schema ----------------------------------------------------------------
-await client.ExecuteAsync("DROP STREAM IF EXISTS dotnet_demo", ct);
-await client.ExecuteAsync("CREATE STREAM dotnet_demo (id int32, msg string)", ct);
-Console.WriteLine("created stream dotnet_demo");
+// -- run --------------------------------------------------------------------
+var results = new List<(string Name, bool Ok)>();
 
-// -- subscribe BEFORE writing ----------------------------------------------
-// A streaming SELECT only sees rows that arrive after it attaches, so start it
-// first. Row arrival times are recorded to prove nothing is being buffered.
-var arrivals = new List<double>();
-var sw = Stopwatch.StartNew();
+if (which is "all" or "basic")
+    results.Add(("basic", await Demos.BasicAsync(client, ct)));
+if (which is "all" or "random")
+    results.Add(("random", await Demos.RandomStreamAsync(client, ct)));
+if (which is "all" or "mv")
+    results.Add(("mv", await Demos.MaterializedViewAsync(client, ct)));
 
-var subscription = Task.Run(async () =>
+if (results.Count == 0)
 {
-    await foreach (var row in client.StreamAsync<Row>("SELECT id, msg FROM dotnet_demo", ct))
-    {
-        arrivals.Add(sw.Elapsed.TotalSeconds);
-        Console.WriteLine($"  [t+{sw.Elapsed.TotalSeconds,5:F1}s] streamed  {row.id} {row.msg}");
-        if (arrivals.Count == 3) break;
-    }
-}, ct);
-
-await Task.Delay(2500, ct); // give the subscription time to attach
-
-// -- write -----------------------------------------------------------------
-for (var i = 1; i <= 3; i++)
-{
-    await client.IngestAsync("dotnet_demo",
-        ["id", "msg"], [[100 + i, $"live-{i}"]], ct);
-    Console.WriteLine($"  [t+{sw.Elapsed.TotalSeconds,5:F1}s] ingested  live-{i}");
-    await Task.Delay(3000, ct);
+    Console.WriteLine($"unknown demo '{which}' -- expected: basic, random, mv, all");
+    return 2;
 }
 
-await subscription;
+// -- summary ----------------------------------------------------------------
+Console.WriteLine("\n" + new string('-', 44));
+foreach (var (name, ok) in results)
+    Console.WriteLine($"  {(ok ? "PASS" : "FAIL")}  {name}");
 
-// -- historical read -------------------------------------------------------
-// table(...) makes this a bounded query that actually terminates.
-var all = await client.QueryAsync<Row>(
-    "SELECT id, msg FROM table(dotnet_demo) ORDER BY id", ct);
-Console.WriteLine($"\nhistorical read: {all.Count} rows -> " +
-                  string.Join(", ", all.Select(r => $"{r.id}:{r.msg}")));
-
-// -- assertions ------------------------------------------------------------
-// If HttpClient were buffering, all three rows would land together at the end.
-// A multi-second spread is the proof that delivery is genuinely incremental.
-var spread = arrivals[^1] - arrivals[0];
-var ok = arrivals.Count == 3 && all.Count == 3 && spread > 3.0;
-
-Console.WriteLine($"arrival spread : {spread:F1}s (buffered would be ~0s)");
-Console.WriteLine(ok ? "\n=== PASS ===\n" : "\n=== FAIL ===\n");
-
-await client.ExecuteAsync("DROP STREAM IF EXISTS dotnet_demo", ct);
-return ok ? 0 : 1;
-
-record Row(int id, string msg);
-record Ver(string version);
+var allOk = results.All(r => r.Ok);
+Console.WriteLine(allOk ? "\n=== PASS ===\n" : "\n=== FAIL ===\n");
+return allOk ? 0 : 1;
