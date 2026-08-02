@@ -1,0 +1,7 @@
+bin/
+obj/
+.nuget/
+.dotnet/
+.local/
+.config/
+*.user

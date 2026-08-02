@@ -1,0 +1,24 @@
+# Runs the demo against a real Proton instance:  docker compose up
+# Everything lives in this one directory — no Dockerfile, no local dotnet needed.
+services:
+  proton:
+    image: timeplus/proton:latest
+    ports:
+      - "3218:3218"   # HTTP + REST API   — streaming semantics by default
+      - "8463:8463"   # native TCP        — used by the JDBC/Go/Python drivers
+      - "8123:8123"   # ClickHouse-compatible HTTP — historical by default
+
+  app:
+    image: mcr.microsoft.com/dotnet/sdk:8.0
+    depends_on: [proton]
+    working_dir: /app
+    volumes:
+      - .:/app
+    user: "1000:1000"          # keep build output owned by you, not root
+    environment:
+      PROTON_URL: "http://proton:3218"
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "1"
+      NUGET_PACKAGES: "/app/.nuget"
+      HOME: "/app"
+    command: ["dotnet", "run", "--verbosity", "quiet"]
